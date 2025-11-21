@@ -1,0 +1,30 @@
+[
+  {
+    "sender": "ai",
+    "text": "RECOMMENDATION: Data source is set to mock/fallback. \n REASONING: The model successfully generated a prediction, but the advisory is based on the test data set."
+  },
+  {
+    "sender": "ai",
+    "text": "RECOMMENDATION: Data source is set to mock/fallback. \n REASONING: The model successfully generated a prediction, but the advisory is based on the test data set."
+  },
+  {
+    "sender": "user",
+    "text": "hi"
+  },
+  {
+    "sender": "ai",
+    "text": "**RECOMMENDATION:** Data source is set to mock/fallback. \n **REASONING:** The model successfully generated a prediction, but the advisory is based on the test data set."
+  },
+  {
+    "sender": "user",
+    "text": "hi"
+  },
+  {
+    "sender": "user",
+    "text": "hi"
+  },
+  {
+    "sender": "ai",
+    "text": "**RECOMMENDATION:** Data source is set to mock/fallback. \n **REASONING:** The model successfully generated a prediction, but the advisory is based on the test data set."
+  }
+]

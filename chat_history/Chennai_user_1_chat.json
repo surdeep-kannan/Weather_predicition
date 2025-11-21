@@ -1,0 +1,14 @@
+[
+  {
+    "sender": "ai",
+    "text": "RECOMMENDATION: EMERGENCY IRRIGATION \n REASONING: Soil moisture is critically low at 0.0% and immediate watering is required to prevent crop failure, regardless of short-term rain probability."
+  },
+  {
+    "sender": "user",
+    "text": "hi"
+  },
+  {
+    "sender": "ai",
+    "text": "As an Agronomist in Chennai, Tamil Nadu, I'd like to emphasize that with soil moisture at 0.0%, immediate watering is crucial to prevent crop failure during the Northeast Monsoon season.\n\nGiven the current conditions:\n\n- Pressure: 1009.14 hPa (Stable/Normal)\n- Temp: 26.20C\n- Soil Moisture: 0.0%\n- Season: Northeast Monsoon (Rainy)\n\nI strongly recommend EMERGENCY IRRIGATION to prevent potential crop damage due to soil moisture depletion."
+  }
+]
