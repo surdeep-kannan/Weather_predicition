@@ -1,3 +1,4 @@
+
 // ==========================================
 // 1. REACT FRONTEND (App.jsx)
 // ==========================================
@@ -8,8 +9,8 @@ import {
 } from 'lucide-react';
 import './App.css';
 
-const API_URL = "http://10.99.252.187:8000/api/agri-advisory";
-const CHAT_URL = "http://10.99.252.187:8000/api/chat";
+const API_URL = "http://172.16.22.162:8000/api/agri-advisory";
+const CHAT_URL = "http://172.16.22.162:8000/api/chat";
 
 function App() {
   const [data, setData] = useState(null);

@@ -1,7 +1,7 @@
 import os
 import datetime
 from contextlib import asynccontextmanager
-from typing import Tuple
+from typing import Tuple, List, Dict, Any
 
 import numpy as np
 import pandas as pd
@@ -76,18 +76,20 @@ def _parse_iso_ts(ts_str: str) -> datetime.datetime:
     except Exception:
         return datetime.datetime.utcnow()
 
-def get_last_30_readings() -> Tuple[pd.DataFrame, dict, str]:
+def get_all_readings_and_prepare_model_input() -> Tuple[pd.DataFrame, dict, str, List[Tuple[str, Dict[str, Any]]]]:
     """
-    Read the last 30 timestamped readings from Firebase.
-    Expects structure:
-    sensor_readings/
-        2025-11-20T10:00:00Z: { Temp_DHT: ..., Hum_DHT: ..., Pressure_hPa: ..., Soil_Moisture_Raw: ..., Rain: ... }
-        2025-11-20T10:01:00Z: { ... }
-        ...
+    Reads ALL timestamped readings from Firebase, sorts them chronologically.
+    It returns:
+    1. The **latest 30 readings** as a DataFrame for the BiLSTM prediction (fixed input size).
+    2. The latest single reading dictionary.
+    3. The latest reading timestamp string.
+    4. **All** sorted historical readings (list of tuples) for daily summary analysis by the LLM.
+    
     Returns:
-        df: pd.DataFrame with columns FEATURE_COLS and length 30 (oldest → newest)
+        df: pd.DataFrame with columns FEATURE_COLS and length 30 (the latest sequence)
         latest: dict for the latest reading
         latest_ts: timestamp string key for the latest reading
+        all_items: List of (timestamp, reading_dict) for all history
     Raises HTTPException on problems.
     """
     if not ai_resources.get("firebase_initialized"):
@@ -95,6 +97,7 @@ def get_last_30_readings() -> Tuple[pd.DataFrame, dict, str]:
 
     try:
         ref = db.reference(FIREBASE_DATA_PATH)
+        # Fetch ALL data available in the path
         snapshot = ref.get()
 
         if not snapshot or not isinstance(snapshot, dict):
@@ -102,10 +105,14 @@ def get_last_30_readings() -> Tuple[pd.DataFrame, dict, str]:
 
         # snapshot keys should be timestamps; sort them lexicographically (ISO 8601 sorts chronologically)
         items = sorted(snapshot.items(), key=lambda kv: kv[0])
+        
+        # Check if enough data is available for the model's sequence length (30)
         if len(items) < 30:
-            raise HTTPException(status_code=503, detail=f"Need at least 30 timestamped readings, found {len(items)}. Populate Firebase with historical readings.")
+            raise HTTPException(status_code=503, detail=f"The BiLSTM model requires an input sequence of 30 historical readings. Found only {len(items)}. Populate Firebase with more historical readings.")
 
-        last_30 = items[-30:]  # list of (ts_str, entry_dict), oldest → newest among the slice
+        # Slice the last 30 items for the model input sequence (fixed-length sequence required by the BiLSTM model).
+        last_30 = items[-30:]
+        
         temps, hums, pres, rains = [], [], [], []
         soil_vals = []
 
@@ -134,7 +141,7 @@ def get_last_30_readings() -> Tuple[pd.DataFrame, dict, str]:
         latest_entry = dict(latest_entry)
         latest_entry["Time_ISO"] = latest_entry.get("Time_ISO", latest_ts)
 
-        return df, latest_entry, latest_ts
+        return df, latest_entry, latest_ts, items
 
     except HTTPException:
         # pass through our own raised HTTPException
@@ -185,6 +192,52 @@ def get_season_context(dt: datetime.datetime) -> str:
         return "Summer"
     return "Southwest Monsoon"
 
+def get_daily_summary(all_items: List[Tuple[str, Dict[str, Any]]], latest_ts: str) -> str:
+    """Calculates summary statistics for the current day from all available readings."""
+    if not all_items:
+        return "No historical data to summarize."
+
+    latest_date = _parse_iso_ts(latest_ts).date()
+    daily_readings = []
+
+    for ts_key, entry in all_items:
+        try:
+            ts_date = _parse_iso_ts(ts_key).date()
+            # Filter all data points that occurred on the current day
+            if ts_date == latest_date:
+                daily_readings.append({
+                    "temp": float(entry.get("Temp_DHT", np.nan)),
+                    "hum": float(entry.get("Hum_DHT", np.nan)),
+                    "soil": float(entry.get("Soil_Moisture_Raw", np.nan)),
+                    "rain": float(entry.get("Rain", np.nan))
+                })
+        except Exception:
+            continue # Skip malformed entries
+
+    if not daily_readings:
+        return f"No data found for the current day ({latest_date})."
+    
+    # Filter out entries where critical values are NaN
+    df_daily = pd.DataFrame(daily_readings).dropna(subset=['temp', 'hum', 'soil', 'rain'])
+    
+    if df_daily.empty:
+        return f"No valid numeric data found for the current day ({latest_date})."
+
+    t_avg, t_min, t_max = df_daily['temp'].agg(['mean', 'min', 'max']).round(1)
+    h_avg, h_min, h_max = df_daily['hum'].agg(['mean', 'min', 'max']).round(1)
+    # Use the overall minimum soil moisture for the day as the critical metric
+    soil_min = df_daily['soil'].min().round(1) 
+    total_rain = df_daily['rain'].sum().round(2)
+    count = len(df_daily)
+
+    return (
+        f"Daily Summary (Total {count} readings today, starting from {latest_date}): "
+        f"Temp Avg/Min/Max: {t_avg}°C/{t_min}°C/{t_max}°C. "
+        f"Humidity Avg/Min/Max: {h_avg}%/{h_min}%/{h_max}%. "
+        f"Minimum Soil Moisture recorded: {soil_min}%. "
+        f"Total Daily Rainfall (Accumulated): {total_rain}mm."
+    )
+
 async def ask_ai(prompt: str) -> str:
     payload = {
         "model": LLAMA_MODEL_NAME,
@@ -194,7 +247,7 @@ async def ask_ai(prompt: str) -> str:
             # --- REFINED SYSTEM INSTRUCTION ---
             "system": (
                 "You are a highly concise Agronomist AI, specializing in real-time sensor data interpretation. "
-                "You MUST use the provided context to inform your answer. "
+                "You MUST use the provided context, including the FULL DAILY HISTORY ANALYSIS, to inform your answer. "
                 "NO greetings, NO fillers, ONLY direct, professional agricultural advisory."
             )
             # ---------------------------------
@@ -215,11 +268,12 @@ async def ask_ai(prompt: str) -> str:
 @app.get("/api/agri-advisory")
 async def get_advisory(district: str = Query(DEFAULT_DISTRICT)):
     """
-    Returns advisory using the last 30 real readings from Firebase (no mocks).
+    Returns advisory using the last 30 real readings for the model, and all historical data
+    for the LLM context.
     Requires at least 30 timestamped entries in sensor_readings/.
     """
-    # Load last 30 readings and latest entry
-    hist_df, latest_entry, latest_ts = get_last_30_readings()
+    # Load all historical readings and prepare the last 30 for the model input
+    hist_df, latest_entry, latest_ts, all_items = get_all_readings_and_prepare_model_input()
     season = get_season_context(_parse_iso_ts(latest_entry.get("Time_ISO", latest_ts)))
 
     model_res = get_model_resources(district)
@@ -274,7 +328,14 @@ async def get_advisory(district: str = Query(DEFAULT_DISTRICT)):
         action = "START IRRIGATION" if soil < 40 else "NO ACTION"
         reason = f"Soil {soil}% and low rainfall probability."
 
+    # Use full data for LLM advisory
+    daily_summary = get_daily_summary(all_items, latest_ts)
+    
     prompt = f"""
+    --- FULL DATA ANALYSIS CONTEXT ---
+    Model Forecast (Rain Probability): {conf}%
+    {daily_summary}
+    ----------------------------------
     **RECOMMENDATION:** {action}
     **REASONING:** {reason}
     """
@@ -307,8 +368,11 @@ async def get_advisory(district: str = Query(DEFAULT_DISTRICT)):
 @app.post("/api/chat")
 async def chat(req: ChatRequest):
     
-    _, latest_entry, latest_ts = get_last_30_readings()
+    # Fetch all historical readings and get the latest entry
+    _, latest_entry, latest_ts, all_items = get_all_readings_and_prepare_model_input()
     season = get_season_context(_parse_iso_ts(latest_entry.get("Time_ISO", latest_ts)))
+
+    daily_summary = get_daily_summary(all_items, latest_ts)
 
     try:
         t = float(latest_entry.get("Temp_DHT"))
@@ -318,7 +382,7 @@ async def chat(req: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Invalid latest sensor numeric values: {e}")
 
-    # --- REFINED CHAT PROMPT: Highly restrictive to force immediate data analysis ---
+    # --- REFINED CHAT PROMPT: Includes FULL DAILY HISTORY ANALYSIS ---
     prompt = f"""
     --- LIVE SENSOR DATA FOR {req.district.upper()} ---
     Current Season: {season}
@@ -326,11 +390,14 @@ async def chat(req: ChatRequest):
     Relative Humidity (Hum_DHT): {h}%
     Surface Pressure (Pressure_hPa): {p} hPa
     Soil Moisture (Soil_Moisture_Raw): {soil}%
+    
+    --- DAILY HISTORY ANALYSIS ---
+    {daily_summary}
     --------------------------------------------------
 
-    You MUST analyze the LIVE SENSOR DATA above and provide a concise, immediate agricultural status report.
+    You MUST analyze the LIVE SENSOR DATA and the DAILY HISTORY ANALYSIS above and provide a concise, immediate agricultural status report.
     
-    1. Focus ONLY on the **current, immediate agricultural implication** of the sensor readings within the context of the {season} season.
+    1. Focus ONLY on the **current, immediate agricultural implication** of the sensor readings within the context of the {season} season and the daily history.
     2. Do NOT provide speculative forecasts (like "rain may occur").
     3. If the user's question is vague (like a greeting or a statement of facts), treat it as a request for the current Agricultural Status Report.
     4. Base your entire response on the current data and the season.
