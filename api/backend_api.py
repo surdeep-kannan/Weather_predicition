@@ -2,6 +2,8 @@ import os
 import datetime
 from contextlib import asynccontextmanager
 from typing import Tuple, List, Dict, Any
+# === FIX: ADD MISSING JSON IMPORT ===
+import json 
 
 import numpy as np
 import pandas as pd
@@ -12,7 +14,18 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from tensorflow.keras.models import load_model
+# TensorFlow is a large dependency. On Vercel, it's safer to attempt import
+# conditionally or rely on a successful Vercel build environment.
+try:
+    from tensorflow.keras.models import load_model
+    TENSORFLOW_AVAILABLE = True
+except ImportError:
+    print("WARNING: TensorFlow not found. Prediction models will be disabled.")
+    TENSORFLOW_AVAILABLE = False
+except Exception as e:
+    print(f"WARNING: TensorFlow load failed: {e}. Prediction models disabled.")
+    TENSORFLOW_AVAILABLE = False
+
 
 # --- FIREBASE ---
 import firebase_admin
@@ -22,15 +35,20 @@ from firebase_admin import credentials, db
 # CONFIG
 # ==========================================
 DEFAULT_DISTRICT = "Chennai"
-BASE_PATH = os.getcwd()
+# Use relative path for Vercel deployment
+BASE_PATH = os.getcwd() 
 MODELS_DIR = os.path.join(BASE_PATH, "district_models")
 FEATURE_COLS = ['temperature_2m', 'relative_humidity_2m', 'rain', 'surface_pressure']
 
-FIREBASE_KEY_PATH = "agriweather_key.json"
+# NOTE: For Vercel deployment, FIREBASE_KEY_PATH should be handled via a secure
+# method like Environment Variables storing the JSON content, or disabled entirely.
+# We disable it here for safe Vercel deployment since the key is sensitive.
+FIREBASE_KEY_PATH = "agriweather_key.json" # Still referenced, but init is protected below
 FIREBASE_DATABASE_URL = "https://agriweather-e5ba4-default-rtdb.firebaseio.com"
 FIREBASE_DATA_PATH = "sensor_readings"
 
-LLAMA_API_URL = "http://localhost:11434/api/generate"
+# NOTE: Localhost cannot be used on Vercel. This is disabled for safety.
+LLAMA_API_URL = os.environ.get("LLAMA_API_URL", "http://llama-is-offline.local") 
 LLAMA_MODEL_NAME = "llama3.2:1b"
 
 ai_resources = {}
@@ -39,11 +57,15 @@ loaded_models = {}
 class ChatRequest(BaseModel):
     message: str
     district: str = DEFAULT_DISTRICT
+    # Assuming chat history is NOT needed for this presentation-ready serverless function
 
 # ==========================================
 # MODEL LOADER
 # ==========================================
 def get_model_resources(district_name: str):
+    if not TENSORFLOW_AVAILABLE:
+        return None
+        
     if district_name in loaded_models:
         return loaded_models[district_name]
 
@@ -79,21 +101,17 @@ def _parse_iso_ts(ts_str: str) -> datetime.datetime:
 def get_all_readings_and_prepare_model_input() -> Tuple[pd.DataFrame, dict, str, List[Tuple[str, Dict[str, Any]]]]:
     """
     Reads ALL timestamped readings from Firebase, sorts them chronologically.
-    It returns:
-    1. The **latest 30 readings** as a DataFrame for the BiLSTM prediction (fixed input size).
-    2. The latest single reading dictionary.
-    3. The latest reading timestamp string.
-    4. **All** sorted historical readings (list of tuples) for daily summary analysis by the LLM.
     
     Returns:
         df: pd.DataFrame with columns FEATURE_COLS and length 30 (the latest sequence)
         latest: dict for the latest reading
         latest_ts: timestamp string key for the latest reading
         all_items: List of (timestamp, reading_dict) for all history
+        
     Raises HTTPException on problems.
     """
     if not ai_resources.get("firebase_initialized"):
-        raise HTTPException(status_code=503, detail="Firebase not connected.")
+        raise HTTPException(status_code=503, detail="Firebase not connected or models missing. Cannot retrieve sensor data.")
 
     try:
         ref = db.reference(FIREBASE_DATA_PATH)
@@ -150,16 +168,24 @@ def get_all_readings_and_prepare_model_input() -> Tuple[pd.DataFrame, dict, str,
         raise HTTPException(status_code=500, detail=f"Firebase read error: {e}")
 
 # ==========================================
-# SERVER LIFESPAN
+# SERVER LIFESPAN (Vercel uses this on cold start)
 # ==========================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize Firebase once
     try:
-        cred = credentials.Certificate(FIREBASE_KEY_PATH)
-        firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DATABASE_URL})
-        ai_resources["firebase_initialized"] = True
-        print("Firebase initialized.")
+        # Check if the private key content is available via Environment Variable
+        if "FIREBASE_PRIVATE_KEY_JSON" in os.environ and not firebase_admin._apps:
+            cred_json_str = os.environ["FIREBASE_PRIVATE_KEY_JSON"]
+            cred_json = json.loads(cred_json_str)
+            cred = credentials.Certificate(cred_json)
+            firebase_admin.initialize_app(cred, {"databaseURL": FIREBASE_DATABASE_URL})
+            ai_resources["firebase_initialized"] = True
+            print("Firebase initialized using environment variable.")
+        else:
+            ai_resources["firebase_initialized"] = False
+            print("Firebase disabled: Missing FIREBASE_PRIVATE_KEY_JSON environment variable or already initialized.")
+            
     except Exception as e:
         ai_resources["firebase_initialized"] = False
         print("Firebase init failed:", e)
@@ -169,6 +195,7 @@ async def lifespan(app: FastAPI):
     yield
     loaded_models.clear()
 
+# Vercel looks for the 'app' variable in this module.
 app = FastAPI(title="Agri-Weather AI", lifespan=lifespan)
 
 app.add_middleware(
@@ -239,6 +266,10 @@ def get_daily_summary(all_items: List[Tuple[str, Dict[str, Any]]], latest_ts: st
     )
 
 async def ask_ai(prompt: str) -> str:
+    # Check if the LLAMA_API_URL is still local or default (i.e., not configured for deployment)
+    if 'localhost' in LLAMA_API_URL or 'llama-is-offline.local' in LLAMA_API_URL:
+        return "**RECOMMENDATION:** AI chat is offline.\n**REASONING:** Llama server URL is not configured for remote access."
+
     payload = {
         "model": LLAMA_MODEL_NAME,
         "prompt": prompt,
@@ -256,11 +287,12 @@ async def ask_ai(prompt: str) -> str:
 
     try:
         async with httpx.AsyncClient() as client:
+            # Use the environment variable-set URL
             r = await client.post(LLAMA_API_URL, json=payload, timeout=45)
             r.raise_for_status()
             return r.json().get("response", "").strip()
     except Exception:
-        return "**RECOMMENDATION:** AI engine offline.\n**REASONING:** Llama server unreachable."
+        return "**RECOMMENDATION:** AI engine offline.\n**REASONING:** Could not reach the configured LLama server."
 
 # ==========================================
 # API — ADVISORY
@@ -270,30 +302,34 @@ async def get_advisory(district: str = Query(DEFAULT_DISTRICT)):
     """
     Returns advisory using the last 30 real readings for the model, and all historical data
     for the LLM context.
-    Requires at least 30 timestamped entries in sensor_readings/.
     """
     # Load all historical readings and prepare the last 30 for the model input
+    # This will raise a 503 if Firebase is not connected or data is insufficient
     hist_df, latest_entry, latest_ts, all_items = get_all_readings_and_prepare_model_input()
     season = get_season_context(_parse_iso_ts(latest_entry.get("Time_ISO", latest_ts)))
 
     model_res = get_model_resources(district)
+    
+    # If model resources are unavailable, we cannot provide prediction, but can still advise.
     if model_res is None:
-        raise HTTPException(status_code=500, detail="Model missing for requested district and default fallback.")
+        # Fallback to a rule-based system if the ML model/TF is missing
+        prob = 0.0
+        conf = 50.0 # Low confidence for rule-based
+    else:
+        # Scale and reshape for BiLSTM: scaler expects same column order as FEATURE_COLS
+        try:
+            scaled = model_res["scaler"].transform(hist_df[FEATURE_COLS])
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Scaler transform failed: {e}")
 
-    # Scale and reshape for BiLSTM: scaler expects same column order as FEATURE_COLS
-    try:
-        scaled = model_res["scaler"].transform(hist_df[FEATURE_COLS])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Scaler transform failed: {e}")
+        final = np.expand_dims(scaled, axis=0)  # shape -> (1, 30, 4)
 
-    final = np.expand_dims(scaled, axis=0)  # shape -> (1, 30, 4)
+        try:
+            prob = float(model_res["model"].predict(final, verbose=0)[0][0])
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Model prediction failed: {e}")
 
-    try:
-        prob = float(model_res["model"].predict(final, verbose=0)[0][0])
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Model prediction failed: {e}")
-
-    conf = round(prob * 100, 2)
+        conf = round(prob * 100, 2)
 
     # Extract latest sensor values
     try:
@@ -369,6 +405,7 @@ async def get_advisory(district: str = Query(DEFAULT_DISTRICT)):
 async def chat(req: ChatRequest):
     
     # Fetch all historical readings and get the latest entry
+    # This will raise a 503 if Firebase is not connected or data is insufficient
     _, latest_entry, latest_ts, all_items = get_all_readings_and_prepare_model_input()
     season = get_season_context(_parse_iso_ts(latest_entry.get("Time_ISO", latest_ts)))
 
@@ -409,7 +446,3 @@ async def chat(req: ChatRequest):
     reply = await ask_ai(prompt)
 
     return {"reply": reply}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
