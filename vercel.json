@@ -26,5 +26,5 @@
       "dest": "agri-weather-web/dist/$1"
     }
   ],
-  "installCommand": "npm install --prefix agri-weather-web && pip install -r agri-weather-web/api/requirements.txt"
+  "installCommand": "npm install "
 }
