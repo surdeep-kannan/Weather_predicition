@@ -11,8 +11,10 @@ import './App.css';
 import InventoryView from './InventoryView';
 import SeedShopFinder from './SeedShopFinder'; // <-- Imported for the new 'shop' tab
 
-const API_URL = "http://10.237.95.187:8000/api/agri-advisory";
-const CHAT_URL = "http://10.237.95.187:8000/api/chat";
+// --- UPDATED: Use Relative Paths for Vercel Backend Connection ---
+const API_URL = "/api/agri-advisory"; // Vercel routes this to agri-weather-web/api/app.py
+const CHAT_URL = "/api/chat";         // Vercel routes this to agri-weather-web/api/app.py
+// ----------------------------------------------------------------
 
 function App() {
   const [data, setData] = useState(null);
@@ -25,13 +27,15 @@ function App() {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(API_URL);
-      if (!response.ok) throw new Error("Backend Offline");
+      // NOTE: Using window.location.origin is generally not needed for relative paths,
+      // but fetch(API_URL) will automatically resolve correctly on Vercel.
+      const response = await fetch(API_URL); 
+      if (!response.ok) throw new Error("Backend Offline (Status: " + response.status + ")");
       const json = await response.json();
       setData(json);
     } catch (err) {
       console.error(err);
-      setError("Could not connect to Python Backend.");
+      setError("Could not connect to Python Backend. Check Vercel logs for function errors.");
     } finally {
       setLoading(false);
     }
@@ -108,6 +112,8 @@ function App() {
 function DashboardView({ data, refresh, switchToChat }) {
   const isRain = data.analysis.forecast.includes('RAIN');
   const isStop = data.analysis.action.includes('STOP') || data.analysis.action.includes('DELAY') || data.analysis.action.includes('NO ACTION');
+  const soilMoistureLow = data.sensors.soil_moisture < 40;
+
 
   return (
     <div className="dashboard-container">
@@ -123,9 +129,9 @@ function DashboardView({ data, refresh, switchToChat }) {
           <div className="confidence">{data.analysis.confidence}% Confidence</div>
         </div>
 
-        <div className={`card action-card ${isStop ? 'safe-theme' : 'danger-theme'}`}>
+        <div className={`card action-card ${soilMoistureLow ? 'danger-theme' : 'safe-theme'}`}>
           <div className="action-header">
-            {isStop ? <CheckCircle2 size={24} /> : <AlertTriangle size={24} />}
+            {soilMoistureLow ? <AlertTriangle size={24} /> : <CheckCircle2 size={24} />}
             <p className="card-label">REQUIRED ACTION</p>
           </div>
           <h3>{data.analysis.action}</h3>
@@ -198,13 +204,15 @@ function ChatView({ initialData }) {
     setIsSending(true);
 
     try {
+      // Use relative CHAT_URL
       const response = await fetch(CHAT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           message: userMsg.text,
           district: initialData.location,
-          history: historyForBackend
+          // History is currently NOT supported by the Vercel Serverless chat endpoint
+          // history: historyForBackend 
         })
       });
       
