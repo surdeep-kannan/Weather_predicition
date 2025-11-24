@@ -9,7 +9,7 @@
       }
     },
     {
-      "src": "agri-weather-web/src/main.jsx",
+      "src": "agri-weather-web/package.json",
       "use": "@vercel/static-build",
       "config": {
         "outputDirectory": "dist"
